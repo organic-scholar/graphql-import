@@ -3,15 +3,18 @@ import {
   DefinitionNode,
   parse,
   print,
-  TypeDefinitionNode,
-  GraphQLObjectType,
   ObjectTypeDefinitionNode,
   DocumentNode,
   Kind,
+  introspectionQuery,
+  printSchema,
+  buildClientSchema,
 } from 'graphql'
 import { flatten, groupBy, includes, keyBy, isEqual } from 'lodash'
 import * as path from 'path'
 import * as resolveFrom from 'resolve-from'
+import fetch from 'node-fetch';
+
 
 import { completeDefinitionPool, ValidDefinitionNode } from './definition'
 
@@ -26,15 +29,41 @@ export interface RawModule {
 
 const rootFields = ['Query', 'Mutation', 'Subscription']
 
-const read = (schema: string, schemas?: { [key: string]: string }) => {
-  if (isFile(schema)) {
-    return fs.readFileSync(schema, { encoding: 'utf8' })
-  }
-  return schemas ? schemas[schema] : schema
+const read = (schema: string, schemas?: { [key: string]: string }):Promise<string> =>
+{
+  return new Promise<string>((resolve, reject)=>
+  {
+    if(isUri(schema))
+    {
+      fetch(schema, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', },
+        body: JSON.stringify({
+          query: introspectionQuery,
+        }),
+      })
+      .then(res => res.json())
+      .then(json =>
+      {
+        resolve(printSchema(buildClientSchema(json.data)));
+      }).catch(reject);
+    }
+    else if (isFile(schema))
+    {
+      fs.readFile(schema, (err, result) =>
+      {
+        if(err) return reject(err);
+        resolve(result.toString());
+      });
+    }
+    else {
+      schemas ? resolve(schemas[schema]) : resolve(schema)
+    }
+  });
 }
 
+const isUri = f => f.startsWith('http')
 const isFile = f => f.endsWith('.graphql')
-
 /**
  * Parse a single import line and extract imported types and schema filename
  *
@@ -80,15 +109,14 @@ export function parseSDL(sdl: string): RawModule[] {
  * @param filePath File path to the initial schema file
  * @returns Single bundled schema with all imported types
  */
-export function importSchema(
-  schema: string,
-  schemas?: { [key: string]: string },
-): string {
-  const sdl = read(schema, schemas) || schema
+export async function importSchema( schema: string, schemas?: { [key: string]: string },): Promise<string>
+{
+  const sdl = await read(schema, schemas) || schema
   let document = getDocumentFromSDL(sdl)
 
+
   // Recursively process the imports, starting by importing all types from the initial schema
-  let { allDefinitions, typeDefinitions } = collectDefinitions(
+  let { allDefinitions, typeDefinitions } = await collectDefinitions(
     ['*'],
     sdl,
     schema,
@@ -203,7 +231,7 @@ function resolveModuleFilePath(filePath: string, importFrom: string): string {
  * @param Tracking of all type definitions per schema
  * @returns Both the collection of all type definitions, and the collection of imported type definitions
  */
-function collectDefinitions(
+async function  collectDefinitions(
   imports: string[],
   sdl: string,
   filePath: string,
@@ -211,10 +239,8 @@ function collectDefinitions(
   processedFiles: Map<string, RawModule[]> = new Map(),
   typeDefinitions: ValidDefinitionNode[][] = [],
   allDefinitions: ValidDefinitionNode[][] = [],
-): {
-  allDefinitions: ValidDefinitionNode[][]
-  typeDefinitions: ValidDefinitionNode[][]
-} {
+):Promise<{ allDefinitions: ValidDefinitionNode[][], typeDefinitions: ValidDefinitionNode[][] }>
+{
   const key = isFile(filePath) ? path.resolve(filePath) : filePath
 
   // Get TypeDefinitionNodes from current schema
@@ -237,17 +263,17 @@ function collectDefinitions(
   const rawModules = parseSDL(sdl)
 
   // Process each file (recursively)
-  rawModules.forEach(m => {
-    // If it was not yet processed (in case of circular dependencies)
+  for(let m of rawModules)
+  {
     const moduleFilePath = resolveModuleFilePath(filePath, m.from)
 
     const processedFile = processedFiles.get(key)
-    if (!processedFile || !processedFile.find(rModule => isEqual(rModule, m))) {
-      // Mark this specific import line as processed for this file (for cicular dependency cases)
+    if (!processedFile || !processedFile.find(rModule => isEqual(rModule, m)))
+    {
       processedFiles.set(key, processedFile ? processedFile.concat(m) : [m])
-      collectDefinitions(
-        m.imports,
-        read(moduleFilePath, schemas),
+      let schema = await read(moduleFilePath, schemas);
+      await collectDefinitions( m.imports,
+        schema,
         moduleFilePath,
         schemas,
         processedFiles,
@@ -255,10 +281,10 @@ function collectDefinitions(
         allDefinitions,
       )
     }
-  })
-
-  // Return the maps of type definitions from each file
-  return { allDefinitions, typeDefinitions }
+  }
+  let result = { allDefinitions, typeDefinitions }
+  console.log(result);
+  return result;
 }
 
 /**

@@ -1,0 +1,5 @@
+# import Geo from "https://api.graphqlplaceholder.com/"
+
+type Query {
+    geo:Geo
+}
